@@ -35,6 +35,11 @@ Simbolo* buscar_simbolo(const char* nombre, const char* ambito_actual) {
             }
         }
     }
+    for (int i = num_simbolos - 1; i >= 0; i--) {
+        if (strcmp(tabla[i].nombre, nombre) == 0 && strcmp(tabla[i].ambito, "global") == 0) {
+            return &tabla[i];
+        }
+    }
     return NULL;
 }
 

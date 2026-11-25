@@ -87,10 +87,11 @@ declaracion:
         }
         strcpy(ambito_actual, "global");
     }
-    | MAIN LPAREN RPAREN LBRACE cuerpo RBRACE {
-        strcpy(ambito_actual, "global");
-    }
-    ;
+    | MAIN LPAREN RPAREN LBRACE {
+    strcpy(ambito_actual, "main"); // Cambiamos el ámbito a 'main' para las variables locales
+} cuerpo RBRACE {
+    strcpy(ambito_actual, "global"); // Al salir de main, volvemos a global
+}
 
 parametros:
     /* vacío */ { insertar_simbolo("__params_contador", VAR, TIPO_INT, 0, 0, "global"); }
