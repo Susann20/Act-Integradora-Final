@@ -1,8 +1,8 @@
+//(Caso de prueba con errores léxicos, sintácticos y semánticos)
 #include <stdio.h>
 #define LIMITE 10
 #define LIMITE 20
-
-int BASE = 5;
+const int BASE = 5;
 
 int calcular(int a, int b) {
     int suma = a + b;

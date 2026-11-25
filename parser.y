@@ -4,228 +4,508 @@
 #include <string.h>
 #include "tabla_simbolos.h"
 
-extern int linea;
+extern int yylex();
 extern int yylineno;
-int yylex();
-void yyerror(const char *s);
 extern int errores_lexicos;
-extern int errores_sintacticos;
-extern int errores_semanticos;
+extern FILE *yyin;
+
+void yyerror(const char *s);
+
+int errores_sintacticos = 0;
+int errores_semanticos = 0;
 
 char ambito_actual[64] = "global";
+TipoDato tipo_retorno_actual = TIPO_VOID;
+
+/* Estructuras auxiliares para validación de parámetros y argumentos */
+typedef struct {
+    char nombre[64];
+    TipoDato tipo;
+} ParamTemp;
+
+ParamTemp params_temp[16];
+int num_params_temp = 0;
+
+TipoDato args_temp[16];
+int num_args_temp = 0;
+
+int es_compatible(TipoDato esperado, TipoDato recibido) {
+    if (esperado == TIPO_DESCONOCIDO || recibido == TIPO_DESCONOCIDO) return 1;
+    if (esperado == recibido) return 1;
+    /* Promoción implícita int -> double permitida, double -> int genera incompatibilidad */
+    if (esperado == TIPO_DOUBLE && recibido == TIPO_INT) return 1;
+    return 0;
+}
 %}
 
 %union {
     int ival;
     double dval;
-    char* str;
-    Tipo tipo;
+    char *str;
+    TipoDato tipo;
 }
 
-%token <str> ID LIB LIT_STRING
-%token <ival> LIT_INT
-%token <dval> LIT_DOUBLE
-%token <tipo> TIPO
+%token INCLUDE DEFINE CONST INT DOUBLE MAIN RETURN IF ELSE WHILE
+%token EQ NEQ LE GE LT GT AND OR NOT
+%token PLUS MINUS MULT DIV ASSIGN
+%token LPAREN RPAREN LBRACE RBRACE SEMI COMMA
+%token <ival> INT_LITERAL
+%token <dval> FLOAT_LITERAL
+%token <str> STRING_LITERAL HEADER ID
 
-%token INCLUDE DEFINE CONST MAIN IF ELSE WHILE FOR RETURN
-%token EQ NE LE GE AND OR LT GT NOT
-%token ASIGN MAS MENOS POR DIV
-%token LPAREN RPAREN LBRACE RBRACE PUNTO_COMA COMA
+%type <tipo> tipo expresion termino factor llamada_funcion
 
-%nonassoc LOWER_THAN_ELSE
-%nonassoc ELSE
+/* Precedencia y asociatividad de operadores */
+%right ASSIGN
+%left OR
+%left AND
+%left EQ NEQ
+%left LT GT LE GE
+%left PLUS MINUS
+%left MULT DIV
+%right NOT UMINUS
 
 %%
+
 programa:
-    preprocesador lista_declaraciones
+    lista_elementos_globales funcion_main
     ;
 
-preprocesador:
+lista_elementos_globales:
     /* vacío */
-    | preprocesador INCLUDE LIB { /* Registrar librería (opcional) */ }
-    | preprocesador DEFINE ID LIT_INT {
-        if (existe_en_ambito($3, "global")) {
-            printf("Error semántico en línea %d: macro '%s' ya definida.\n", yylineno, $3);
-            errores_semanticos++;
-        } else {
-            insertar_simbolo($3, MACRO, TIPO_INT, 0, 1, "global");
-        }
-    }
-    | preprocesador DEFINE ID LIT_DOUBLE {
-        if (existe_en_ambito($3, "global")) {
-            printf("Error semántico en línea %d: macro '%s' ya definida.\n", yylineno, $3);
-            errores_semanticos++;
-        } else {
-            insertar_simbolo($3, MACRO, TIPO_DOUBLE, 0, 1, "global");
-        }
+    | lista_elementos_globales elemento_global
+    ;
+
+elemento_global:
+    directiva_include
+    | directiva_define
+    | declaracion_constante_global
+    | declaracion_variable_global
+    | definicion_funcion
+    | error SEMI {
+        fprintf(stderr, "Error sintactico en linea %d: declaracion global mal formada.\n", yylineno);
+        yyerrok;
     }
     ;
 
-lista_declaraciones:
-    /* vacío */
-    | lista_declaraciones declaracion
+directiva_include:
+    INCLUDE HEADER {
+        free($2);
+    }
     ;
 
-declaracion:
-    CONST TIPO ID ASIGN expresion PUNTO_COMA {
-        if (existe_en_ambito($3, "global")) {
-            printf("Error semántico en línea %d: símbolo '%s' ya declarado.\n", yylineno, $3);
+directiva_define:
+    DEFINE ID INT_LITERAL {
+        if (!insertar_simbolo($2, CLASE_MACRO, TIPO_INT, "global", 0, 1)) {
+            fprintf(stderr, "Error semantico en linea %d: macro '%s' ya definida.\n", yylineno, $2);
             errores_semanticos++;
-        } else {
-            insertar_simbolo($3, CONST, $2, 0, 1, "global");
         }
+        free($2);
     }
-    | TIPO ID LPAREN parametros RPAREN LBRACE cuerpo RBRACE {
-        if (existe_en_ambito($2, "global")) {
-            printf("Error semántico en línea %d: función '%s' ya declarada.\n", yylineno, $2);
+    | DEFINE ID FLOAT_LITERAL {
+        if (!insertar_simbolo($2, CLASE_MACRO, TIPO_DOUBLE, "global", 0, 1)) {
+            fprintf(stderr, "Error semantico en linea %d: macro '%s' ya definida.\n", yylineno, $2);
+            errores_semanticos++;
+        }
+        free($2);
+    }
+    ;
+
+tipo:
+    INT      { $$ = TIPO_INT; }
+    | DOUBLE { $$ = TIPO_DOUBLE; }
+    ;
+
+declaracion_constante_global:
+    CONST tipo ID ASSIGN expresion SEMI {
+        if (!insertar_simbolo($3, CLASE_CONSTANTE, $2, "global", 0, 1)) {
+            fprintf(stderr, "Error semantico en linea %d: constante '%s' ya declarada.\n", yylineno, $3);
+            errores_semanticos++;
+        } else if (!es_compatible($2, $5)) {
+            fprintf(stderr, "Error semantico en linea %d: tipo incompatible en inicializacion de constante '%s'.\n", yylineno, $3);
+            errores_semanticos++;
+        }
+        free($3);
+    }
+    ;
+
+declaracion_variable_global:
+    tipo ID SEMI {
+        if (!insertar_simbolo($2, CLASE_VARIABLE, $1, "global", 0, 0)) {
+            fprintf(stderr, "Error semantico en linea %d: variable global '%s' ya declarada.\n", yylineno, $2);
+            errores_semanticos++;
+        }
+        free($2);
+    }
+    | tipo ID ASSIGN expresion SEMI {
+        if (!insertar_simbolo($2, CLASE_VARIABLE, $1, "global", 0, 0)) {
+            fprintf(stderr, "Error semantico en linea %d: variable global '%s' ya declarada.\n", yylineno, $2);
+            errores_semanticos++;
+        } else if (!es_compatible($1, $4)) {
+            fprintf(stderr, "Error semantico en linea %d: tipo incompatible al inicializar '%s'.\n", yylineno, $2);
+            errores_semanticos++;
+        }
+        free($2);
+    }
+    ;
+
+definicion_funcion:
+    tipo ID LPAREN {
+        num_params_temp = 0;
+        strncpy(ambito_actual, $2, 63);
+        tipo_retorno_actual = $1;
+    } lista_parametros RPAREN {
+        if (!insertar_simbolo($2, CLASE_FUNCION, $1, "global", num_params_temp, 0)) {
+            fprintf(stderr, "Error semantico en linea %d: funcion '%s' ya declarada.\n", yylineno, $2);
             errores_semanticos++;
         } else {
-            int aridad = 0;
-            Simbolo* s = buscar_simbolo("__params_contador", "global");
-            if (s) aridad = s->aridad;
-            insertar_simbolo($2, FUNC, $1, aridad, 0, "global");
+            for (int i = 0; i < num_params_temp; i++) {
+                registrar_parametro_funcion($2, i, params_temp[i].tipo);
+                if (!insertar_simbolo(params_temp[i].nombre, CLASE_PARAMETRO, params_temp[i].tipo, ambito_actual, 0, 0)) {
+                    fprintf(stderr, "Error semantico en linea %d: parametro '%s' duplicado en '%s'.\n", yylineno, params_temp[i].nombre, $2);
+                    errores_semanticos++;
+                }
+            }
         }
+    } bloque {
         strcpy(ambito_actual, "global");
+        tipo_retorno_actual = TIPO_VOID;
+        free($2);
     }
-    | MAIN LPAREN RPAREN LBRACE {
-    strcpy(ambito_actual, "main"); // Cambiamos el ámbito a 'main' para las variables locales
-} cuerpo RBRACE {
-    strcpy(ambito_actual, "global"); // Al salir de main, volvemos a global
-}
+    ;
+
+lista_parametros:
+    /* vacío */
+    | parametros
+    ;
 
 parametros:
-    /* vacío */ { insertar_simbolo("__params_contador", VAR, TIPO_INT, 0, 0, "global"); }
-    | lista_params { insertar_simbolo("__params_contador", VAR, TIPO_INT, 1, 0, "global"); }
+    parametro
+    | parametros COMMA parametro
     ;
 
-lista_params:
-    TIPO ID { insertar_simbolo($2, VAR, $1, 0, 0, "global"); }
-    | lista_params COMA TIPO ID {
-        insertar_simbolo($4, VAR, $3, 0, 0, "global");
-        Simbolo* s = buscar_simbolo("__params_contador", "global");
-        if (s) s->aridad++;
+parametro:
+    tipo ID {
+        if (num_params_temp < 16) {
+            strncpy(params_temp[num_params_temp].nombre, $2, 63);
+            params_temp[num_params_temp].tipo = $1;
+            num_params_temp++;
+        }
+        free($2);
     }
     ;
 
-cuerpo:
+funcion_main:
+    INT MAIN LPAREN RPAREN {
+        strcpy(ambito_actual, "main");
+        tipo_retorno_actual = TIPO_INT;
+        insertar_simbolo("main", CLASE_FUNCION, TIPO_INT, "global", 0, 0);
+    } bloque {
+        strcpy(ambito_actual, "global");
+        tipo_retorno_actual = TIPO_VOID;
+    }
+    ;
+
+bloque:
+    LBRACE lista_sentencias RBRACE
+    ;
+
+lista_sentencias:
     /* vacío */
-    | cuerpo sentencia
+    | lista_sentencias sentencia
     ;
 
 sentencia:
-    TIPO ID ASIGN expresion PUNTO_COMA {
-        if (existe_en_ambito($2, ambito_actual)) {
-            printf("Error semántico en línea %d: redeclaración de '%s'.\n", yylineno, $2);
-            errores_semanticos++;
-        } else {
-            insertar_simbolo($2, VAR, $1, 0, 0, ambito_actual);
-        }
+    declaracion_local
+    | asignacion
+    | sentencia_if
+    | sentencia_while
+    | sentencia_return
+    | llamada_funcion SEMI
+    | error SEMI {
+        fprintf(stderr, "Error sintactico en linea %d: sentencia invalida antes de ';'.\n", yylineno);
+        yyerrok;
     }
-    | ID ASIGN expresion PUNTO_COMA {
-        Simbolo* s = buscar_simbolo($1, ambito_actual);
-        if (!s) {
-            printf("Error semántico en línea %d: variable '%s' no declarada en el ámbito actual.\n", yylineno, $1);
+    | error RBRACE {
+        fprintf(stderr, "Error sintactico en linea %d: bloque mal formado antes de '}'.\n", yylineno);
+        yyerrok;
+    }
+    ;
+
+declaracion_local:
+    CONST tipo ID ASSIGN expresion SEMI {
+        if (!insertar_simbolo($3, CLASE_CONSTANTE, $2, ambito_actual, 0, 1)) {
+            fprintf(stderr, "Error semantico en linea %d: constante local '%s' ya declarada en '%s'.\n", yylineno, $3, ambito_actual);
+            errores_semanticos++;
+        } else if (!es_compatible($2, $5)) {
+            fprintf(stderr, "Error semantico en linea %d: tipo incompatible en constante '%s'.\n", yylineno, $3);
+            errores_semanticos++;
+        }
+        free($3);
+    }
+    | tipo ID SEMI {
+        if (!insertar_simbolo($2, CLASE_VARIABLE, $1, ambito_actual, 0, 0)) {
+            fprintf(stderr, "Error semantico en linea %d: variable '%s' ya declarada en '%s'.\n", yylineno, $2, ambito_actual);
+            errores_semanticos++;
+        }
+        free($2);
+    }
+    | tipo ID ASSIGN expresion SEMI {
+        if (!insertar_simbolo($2, CLASE_VARIABLE, $1, ambito_actual, 0, 0)) {
+            fprintf(stderr, "Error semantico en linea %d: variable '%s' ya declarada en '%s'.\n", yylineno, $2, ambito_actual);
+            errores_semanticos++;
+        } else if (!es_compatible($1, $4)) {
+            fprintf(stderr, "Error semantico en linea %d: tipo incompatible al inicializar '%s' (se esperaba '%s', se recibio '%s').\n",
+                    yylineno, $2, tipo_a_cadena($1), tipo_a_cadena($4));
+            errores_semanticos++;
+        }
+        free($2);
+    }
+    ;
+
+asignacion:
+    ID ASSIGN expresion SEMI {
+        Simbolo *s = buscar_simbolo($1, ambito_actual);
+        if (s == NULL) {
+            fprintf(stderr, "Error semantico en linea %d: variable '%s' no declarada.\n", yylineno, $1);
             errores_semanticos++;
         } else if (s->es_constante) {
-            printf("Error semántico en línea %d: no se puede asignar un valor a la constante '%s'.\n", yylineno, $1);
+            fprintf(stderr, "Error semantico en linea %d: no se puede asignar un valor a la constante '%s'.\n", yylineno, $1);
+            errores_semanticos++;
+        } else if (s->clase == CLASE_FUNCION) {
+            fprintf(stderr, "Error semantico en linea %d: '%s' es una funcion y no puede recibir asignacion.\n", yylineno, $1);
+            errores_semanticos++;
+        } else if (!es_compatible(s->tipo, $3)) {
+            fprintf(stderr, "Error semantico en linea %d: tipo incompatible en asignacion a '%s' (se esperaba '%s', se recibio '%s').\n",
+                    yylineno, $1, tipo_a_cadena(s->tipo), tipo_a_cadena($3));
             errores_semanticos++;
         }
+        free($1);
     }
-    | IF LPAREN condicion RPAREN LBRACE cuerpo RBRACE %prec LOWER_THAN_ELSE
-    | IF LPAREN condicion RPAREN LBRACE cuerpo RBRACE ELSE LBRACE cuerpo RBRACE
-    | WHILE LPAREN condicion RPAREN LBRACE cuerpo RBRACE
-    | RETURN expresion PUNTO_COMA
-    | ID LPAREN argumentos RPAREN PUNTO_COMA {
-        Simbolo* s = buscar_simbolo($1, ambito_actual);
-        if (!s) {
-            printf("Error semántico en línea %d: función '%s' no declarada.\n", yylineno, $1);
-            errores_semanticos++;
-        }
-    }
-    | error PUNTO_COMA { yyerrok; errores_sintacticos++; }
     ;
 
-condicion:
-    expresion_relacional
+sentencia_if:
+    IF LPAREN condicion_if RPAREN bloque
+    | IF LPAREN condicion_if RPAREN bloque ELSE bloque
     ;
 
-expresion_relacional:
-    ID {
-        Simbolo* s = buscar_simbolo($1, ambito_actual);
-        if (!s) {
-            printf("Error semántico en línea %d: variable '%s' no declarada en condición.\n", yylineno, $1);
+condicion_if:
+    expresion {
+        if ($1 == TIPO_DESCONOCIDO) {
+            /* Error ya reportado dentro de la expresión o identificador no declarado */
+        } else if ($1 != TIPO_INT && $1 != TIPO_DOUBLE) {
+            fprintf(stderr, "Error semantico en linea %d: tipo no numerico en condicion 'if'.\n", yylineno);
             errores_semanticos++;
         }
     }
-    | expresion_relacional EQ expresion_relacional
-    | expresion_relacional NE expresion_relacional
-    | expresion_relacional LT expresion_relacional
-    | expresion_relacional GT expresion_relacional
-    | expresion_relacional LE expresion_relacional
-    | expresion_relacional GE expresion_relacional
-    | expresion_relacional AND expresion_relacional
-    | expresion_relacional OR expresion_relacional
-    | NOT expresion_relacional
-    | LIT_INT
-    | LIT_DOUBLE
-    | LPAREN expresion_relacional RPAREN
+    ;
+
+sentencia_while:
+    WHILE LPAREN condicion_while RPAREN bloque
+    ;
+
+condicion_while:
+    expresion {
+        if ($1 == TIPO_DESCONOCIDO) {
+            /* Error ya reportado dentro de la expresión o identificador no declarado */
+        } else if ($1 != TIPO_INT && $1 != TIPO_DOUBLE) {
+            fprintf(stderr, "Error semantico en linea %d: tipo no numerico en condicion 'while'.\n", yylineno);
+            errores_semanticos++;
+        }
+    }
+    ;
+
+sentencia_return:
+    RETURN expresion SEMI {
+        if (!es_compatible(tipo_retorno_actual, $2)) {
+            fprintf(stderr, "Error semantico en linea %d: tipo de retorno incompatible (se esperaba '%s', se recibio '%s').\n",
+                    yylineno, tipo_a_cadena(tipo_retorno_actual), tipo_a_cadena($2));
+            errores_semanticos++;
+        }
+    }
+    ;
+
+llamada_funcion:
+    ID LPAREN {
+        num_args_temp = 0;
+    } lista_argumentos RPAREN {
+        Simbolo *func = buscar_simbolo($1, "global");
+        if (func == NULL) {
+            fprintf(stderr, "Error semantico en linea %d: funcion '%s' no declarada.\n", yylineno, $1);
+            errores_semanticos++;
+            $$ = TIPO_DESCONOCIDO;
+        } else if (func->clase != CLASE_FUNCION) {
+            fprintf(stderr, "Error semantico en linea %d: '%s' no es una funcion.\n", yylineno, $1);
+            errores_semanticos++;
+            $$ = TIPO_DESCONOCIDO;
+        } else {
+            if (func->aridad != -1) { // -1 indica función variádica como printf
+                if (func->aridad != num_args_temp) {
+                    fprintf(stderr, "Error semantico en linea %d: la funcion '%s' espera %d argumento(s), pero recibio %d.\n",
+                            yylineno, $1, func->aridad, num_args_temp);
+                    errores_semanticos++;
+                } else {
+                    for (int i = 0; i < num_args_temp; i++) {
+                        if (!es_compatible(func->tipos_parametros[i], args_temp[i])) {
+                            fprintf(stderr, "Error semantico en linea %d: tipo incompatible en argumento %d de '%s' (se esperaba '%s', se recibio '%s').\n",
+                                    yylineno, i + 1, $1,
+                                    tipo_a_cadena(func->tipos_parametros[i]),
+                                    tipo_a_cadena(args_temp[i]));
+                            errores_semanticos++;
+                        }
+                    }
+                }
+            }
+            $$ = func->tipo;
+        }
+        free($1);
+    }
+    ;
+
+lista_argumentos:
+    /* vacío */
+    | argumentos
     ;
 
 argumentos:
-    /* vacío */
-    | lista_args
+    argumento
+    | argumentos COMMA argumento
     ;
 
-lista_args:
-    expresion
-    | lista_args COMA expresion
+argumento:
+    expresion {
+        if (num_args_temp < 16) {
+            args_temp[num_args_temp++] = $1;
+        }
+    }
+    | STRING_LITERAL {
+        if (num_args_temp < 16) {
+            args_temp[num_args_temp++] = TIPO_DESCONOCIDO;
+        }
+        free($1);
+    }
     ;
 
 expresion:
-    LIT_INT
-    | LIT_DOUBLE
+    expresion PLUS termino {
+        if ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) $$ = TIPO_DESCONOCIDO;
+        else $$ = ($1 == TIPO_DOUBLE || $3 == TIPO_DOUBLE) ? TIPO_DOUBLE : TIPO_INT;
+    }
+    | expresion MINUS termino {
+        if ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) $$ = TIPO_DESCONOCIDO;
+        else $$ = ($1 == TIPO_DOUBLE || $3 == TIPO_DOUBLE) ? TIPO_DOUBLE : TIPO_INT;
+    }
+    | expresion EQ expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion NEQ expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion LT expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion GT expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion LE expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion GE expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion AND expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | expresion OR expresion {
+        $$ = ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | NOT expresion {
+        $$ = ($2 == TIPO_DESCONOCIDO) ? TIPO_DESCONOCIDO : TIPO_INT;
+    }
+    | termino {
+        $$ = $1;
+    }
+    ;
+
+termino:
+    termino MULT factor {
+        if ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) $$ = TIPO_DESCONOCIDO;
+        else $$ = ($1 == TIPO_DOUBLE || $3 == TIPO_DOUBLE) ? TIPO_DOUBLE : TIPO_INT;
+    }
+    | termino DIV factor {
+        if ($1 == TIPO_DESCONOCIDO || $3 == TIPO_DESCONOCIDO) $$ = TIPO_DESCONOCIDO;
+        else $$ = ($1 == TIPO_DOUBLE || $3 == TIPO_DOUBLE) ? TIPO_DOUBLE : TIPO_INT;
+    }
+    | factor {
+        $$ = $1;
+    }
+    ;
+
+factor:
+    INT_LITERAL {
+        $$ = TIPO_INT;
+    }
+    | FLOAT_LITERAL {
+        $$ = TIPO_DOUBLE;
+    }
     | ID {
-        Simbolo* s = buscar_simbolo($1, ambito_actual);
-        if (!s) {
-            printf("Error semántico en línea %d: variable '%s' no declarada en el ámbito actual.\n", yylineno, $1);
+        Simbolo *s = buscar_simbolo($1, ambito_actual);
+        if (s == NULL) {
+            fprintf(stderr, "Error semantico en linea %d: variable '%s' no declarada en el ambito actual.\n", yylineno, $1);
             errores_semanticos++;
+            $$ = TIPO_DESCONOCIDO;
+        } else {
+            $$ = s->tipo;
         }
+        free($1);
     }
-    | ID LPAREN argumentos RPAREN {
-        Simbolo* s = buscar_simbolo($1, ambito_actual);
-        if (!s) {
-            printf("Error semántico en línea %d: función '%s' no declarada.\n", yylineno, $1);
-            errores_semanticos++;
-        }
+    | llamada_funcion {
+        $$ = $1;
     }
-    | expresion MAS expresion
-    | expresion MENOS expresion
-    | expresion POR expresion
-    | expresion DIV expresion
-    | LPAREN expresion RPAREN
+    | LPAREN expresion RPAREN {
+        $$ = $2;
+    }
+    | MINUS factor %prec UMINUS {
+        $$ = $2;
+    }
     ;
 
 %%
+
 void yyerror(const char *s) {
-    printf("Error sintáctico en línea %d: %s\n", yylineno, s);
     errores_sintacticos++;
+    fprintf(stderr, "Error sintactico en linea %d: %s\n", yylineno, s);
 }
 
 int main(int argc, char **argv) {
-    if (argc < 2) {
-        printf("Uso: %s <archivo.c>\n", argv[0]);
-        return 1;
+    if (argc > 1) {
+        FILE *archivo = fopen(argv[1], "r");
+        if (!archivo) {
+            perror("No se pudo abrir el archivo de entrada");
+            return 1;
+        }
+        yyin = archivo;
     }
-    FILE *f = fopen(argv[1], "r");
-    if (!f) {
-        printf("No se pudo abrir el archivo: %s\n", argv[1]);
-        return 1;
-    }
-    extern FILE *yyin;
-    yyin = f;
-    init_tabla();
+
+    inicializar_tabla();
     yyparse();
-    fclose(f);
-    imprimir_tabla();
-    return 0;
+
+    imprimir_tabla_simbolos();
+
+    int total_errores = errores_lexicos + errores_sintacticos + errores_semanticos;
+    printf("\n--- RESUMEN DEL ANALISIS (SlimC) ---\n");
+    printf("Errores lexicos    : %d\n", errores_lexicos);
+    printf("Errores sintacticos: %d\n", errores_sintacticos);
+    printf("Errores semanticos : %d\n", errores_semanticos);
+    printf("Total de errores   : %d\n", total_errores);
+
+    if (total_errores == 0) {
+        printf("Resultado: ACCEPT (Programa valido)\n");
+    } else {
+        printf("Resultado: REJECT (Se encontraron errores)\n");
+    }
+
+    liberar_tabla();
+    if (argc > 1) fclose(yyin);
+    return (total_errores == 0) ? 0 : 1;
 }

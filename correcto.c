@@ -1,13 +1,15 @@
+//Caso de prueba valido)
 #include <stdio.h>
 #define LIMITE 10
-
 const int BASE = 5;
 
+/* Función que suma dos enteros */
 int calcular(int a, int b) {
     int suma = a + b;
     return suma;
 }
 
+// Función que calcula el promedio en punto flotante
 double promedio(int a, int b) {
     return calcular(a, b) / 2.0;
 }
