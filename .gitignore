@@ -1,0 +1,13 @@
+# Archivos generados por Flex/Bison
+lex.yy.c
+parser.tab.c
+parser.tab.h
+parser.output
+
+# Ejecutable
+slimc
+*.o
+
+# Archivos temporales
+*.swp
+*~
